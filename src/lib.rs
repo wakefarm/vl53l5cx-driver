@@ -116,7 +116,7 @@ impl Vl53l5cx {
         if status == 255 {
             // This is our conventional error code for I2C failures in `platform.rs`
             Err(DriverError::I2c)
-        } else if status == bindings::VL53L5CX_STATUS_OK as u8 {
+        } else if status == 0 {
             Ok(())
         } else {
             // Any other non-zero status is a sensor-specific error
