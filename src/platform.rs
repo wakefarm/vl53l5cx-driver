@@ -1,9 +1,14 @@
 use embedded_hal::i2c::{I2c, SevenBitAddress};
 use std::time::Instant;
 use std::ffi::c_void;
+use std::slice;
 use once_cell::sync::Lazy;
 
 /// A newtype wrapper for a generic I2C error to satisfy the orphan rule.
+
+// 1. Define the Trait Object type clearly
+// This wraps any I2C bus that implements the Error trait we defined
+pub type I2cHandle = Box<dyn I2c<SevenBitAddress, Error = PlatformError> + Send>;
 #[derive(Debug)]
 pub struct PlatformError(Box<dyn std::error::Error + Send>);
 
@@ -39,64 +44,76 @@ static START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
 #[no_mangle]
 pub extern "C" fn vl53l5cx_platform_write(
-    p_com: *mut c_void,
-    address: u16,
+    p_platform: *mut VL53L5CX_Platform, // <--- FIXED: Accepts struct ptr
     index: u16,
     data: *mut u8,
     count: u32,
 ) -> u8 {
-    // Cast the void pointer back to our I2C bus trait object.
-    let i2c = unsafe {
-        &mut **(p_com as *mut Box<dyn I2c<SevenBitAddress, Error = PlatformError> + Send>)
-    };
+    unsafe {
+        if p_platform.is_null() || (*p_platform).p_com.is_null() {
+            return 255;
+        }
 
-    // The ST driver uses a 16-bit device address where the 7-bit I2C address
-    // is shifted left by 1. We must shift it right to get the real address.
-    let i2c_addr = (address >> 1) as u8;
+        let platform = &*p_platform;
+        let i2c = &mut *(platform.p_com as *mut I2cHandle);
+        let i2c_addr = platform.address as u8;
+        let index_bytes = index.to_be_bytes();
 
-    // The driver wants to write `count` bytes starting from a 16-bit `index`.
-    // We need to combine the index and the data into a single buffer for a single I2C transaction.
-    let index_bytes = index.to_be_bytes();
-    let data_slice = unsafe { std::slice::from_raw_parts(data, count as usize) };
+        // OPTIMIZATION: Use stack memory for small writes (up to 256 bytes data + 2 bytes header)
+        // This covers 99% of command traffic and avoids malloc/free overhead.
+        if count <= 256 {
+            let mut buffer = [0u8; 258]; // 256 data + 2 address
 
-    // Create a temporary buffer for the write operation:
-    // [index_high, index_low, data_0, data_1, ..., data_n]
-    let mut buffer = Vec::with_capacity(2 + count as usize);
-    buffer.extend_from_slice(&index_bytes);
-    buffer.extend_from_slice(data_slice);
+            // 1. Copy Index (Big Endian)
+            buffer[0] = index_bytes[0];
+            buffer[1] = index_bytes[1];
 
-    // Propagate the I2C error to the C driver.
-    // The driver expects 0 for success and non-zero for failure.
-    // We'll use 255 as our generic I2C error code.
-    match i2c.write(i2c_addr, &buffer) {
-        Ok(_) => 0,    // Success
-        Err(_) => 255, // Error
+            // 2. Copy Data
+            let data_slice = slice::from_raw_parts(data, count as usize);
+            buffer[2..2 + count as usize].copy_from_slice(data_slice);
+
+            // 3. Send Stack Buffer
+            match i2c.write(i2c_addr, &buffer[0..2 + count as usize]) {
+                Ok(_) => 0,
+                Err(_) => 255,
+            }
+        } else {
+            // FALLBACK: Use Heap (Vec) for large Firmware chunks (~32KB)
+            let mut buffer = Vec::with_capacity(2 + count as usize);
+            buffer.extend_from_slice(&index_bytes);
+            let data_slice = slice::from_raw_parts(data, count as usize);
+            buffer.extend_from_slice(data_slice);
+
+            match i2c.write(i2c_addr, &buffer) {
+                Ok(_) => 0,
+                Err(_) => 255,
+            }
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn vl53l5cx_platform_read(
-    p_com: *mut c_void,
-    address: u16,
+    p_platform: *mut VL53L5CX_Platform, // <--- FIXED
     index: u16,
     data: *mut u8,
     count: u32,
 ) -> u8 {
-    // Cast the void pointer back to our I2C bus trait object.
-    let i2c = unsafe {
-        &mut **(p_com as *mut Box<dyn I2c<SevenBitAddress, Error = PlatformError> + Send>)
-    };
+    unsafe {
+        if p_platform.is_null() || (*p_platform).p_com.is_null() {
+            return 255;
+        }
+        let platform = &*p_platform;
+        let i2c = &mut *(platform.p_com as *mut I2cHandle);
 
-    let i2c_addr = (address >> 1) as u8;
-    let index_bytes = index.to_be_bytes();
-    let data_slice = unsafe { std::slice::from_raw_parts_mut(data, count as usize) };
+        let i2c_addr = platform.address as u8;
+        let index_bytes = index.to_be_bytes();
+        let data_slice = slice::from_raw_parts_mut(data, count as usize);
 
-    // To read from a specific register, we first perform a write of the
-    // register index, then perform the read.
-    // Propagate the I2C error to the C driver.
-    match i2c.write_read(i2c_addr, &index_bytes, data_slice) {
-        Ok(_) => 0,    // Success
-        Err(_) => 255, // Error
+        match i2c.write_read(i2c_addr, &index_bytes, data_slice) {
+            Ok(_) => 0,
+            Err(_) => 255,
+        }
     }
 }
 
