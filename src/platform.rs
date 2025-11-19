@@ -1,7 +1,7 @@
 use embedded_hal::i2c::{I2c, SevenBitAddress};
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
 use std::time::Instant;
+use std::ffi::c_void;
+use once_cell::sync::Lazy;
 
 /// A newtype wrapper for a generic I2C error to satisfy the orphan rule.
 #[derive(Debug)]
@@ -22,48 +22,37 @@ impl embedded_hal::i2c::Error for PlatformError {
     }
 }
 
-// Using once_cell and Mutex for a thread-safe, globally accessible I2C bus.
-// This is a robust way to manage the shared hardware resource.
-// We store an Option so we can initialize it at runtime.
-// The `Send` trait bound is important for thread safety. The error type is boxed to handle different I2C error types.
-static I2C_BUS: Lazy<Mutex<Option<Box<dyn I2c<SevenBitAddress, Error = PlatformError> + Send>>>> =
-    Lazy::new(|| Mutex::new(None));
+/// This struct mirrors the C `VL53L5CX_Platform` struct.
+/// We must ensure its layout is compatible with the C definition.
+#[repr(C)]
+pub struct VL53L5CX_Platform {
+    pub address: u16,
+    pub p_com: *mut c_void,
+}
 
 // The ST driver requires a tick counter for timeouts.
 // We can implement this with `std::time::Instant`.
 static START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
-
-/// Initializes the platform by taking ownership of the I2C bus object.
-/// This function must be called once before any driver functions are used.
-pub fn set_i2c_bus(bus: Box<dyn I2c<SevenBitAddress, Error = PlatformError> + Send>) {
-    *I2C_BUS.lock().unwrap() = Some(bus);
-}
-
-/// Releases the I2C bus from the global static context.
-pub fn terminate_platform() {
-    // Drop the bus object, releasing the mutex lock.
-    *I2C_BUS.lock().unwrap() = None;
-}
 
 // `vl53l5cx_platform.h` requires these functions to be defined.
 // We define them here in Rust with `extern "C"` and `#[no_mangle]`.
 
 #[no_mangle]
 pub extern "C" fn vl53l5cx_platform_write(
-    dev_addr: u16,
+    p_com: *mut c_void,
+    address: u16,
     index: u16,
     data: *mut u8,
     count: u32,
 ) -> u8 {
-    let mut guard = I2C_BUS.lock().unwrap();
-    let i2c = match guard.as_mut() {
-        Some(bus) => bus,
-        None => return 255, // Error: I2C bus not initialized
+    // Cast the void pointer back to our I2C bus trait object.
+    let i2c = unsafe {
+        &mut **(p_com as *mut Box<dyn I2c<SevenBitAddress, Error = PlatformError> + Send>)
     };
 
     // The ST driver uses a 16-bit device address where the 7-bit I2C address
     // is shifted left by 1. We must shift it right to get the real address.
-    let i2c_addr = (dev_addr >> 1) as u8;
+    let i2c_addr = (address >> 1) as u8;
 
     // The driver wants to write `count` bytes starting from a 16-bit `index`.
     // We need to combine the index and the data into a single buffer for a single I2C transaction.
@@ -87,18 +76,18 @@ pub extern "C" fn vl53l5cx_platform_write(
 
 #[no_mangle]
 pub extern "C" fn vl53l5cx_platform_read(
-    dev_addr: u16,
+    p_com: *mut c_void,
+    address: u16,
     index: u16,
     data: *mut u8,
     count: u32,
 ) -> u8 {
-    let mut guard = I2C_BUS.lock().unwrap();
-    let i2c = match guard.as_mut() {
-        Some(bus) => bus,
-        None => return 255, // Error: I2C bus not initialized
+    // Cast the void pointer back to our I2C bus trait object.
+    let i2c = unsafe {
+        &mut **(p_com as *mut Box<dyn I2c<SevenBitAddress, Error = PlatformError> + Send>)
     };
 
-    let i2c_addr = (dev_addr >> 1) as u8;
+    let i2c_addr = (address >> 1) as u8;
     let index_bytes = index.to_be_bytes();
     let data_slice = unsafe { std::slice::from_raw_parts_mut(data, count as usize) };
 

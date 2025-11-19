@@ -15,6 +15,9 @@ mod bindings {
 // Include the platform glue module.
 pub mod platform;
 
+/// A type alias for the I2C bus trait object for convenience.
+pub type I2cBus = dyn I2c<SevenBitAddress, Error = platform::PlatformError> + Send;
+
 /// A comprehensive error type for the VL53L5CX driver.
 #[derive(Error, Debug)]
 pub enum DriverError {
@@ -32,31 +35,44 @@ pub struct Vl53l5cx {
     /// The ST driver configuration struct. This is the main handle used by the C API.
     /// It's boxed to give it a stable memory address.
     config: Box<bindings::VL53L5CX_Configuration>,
+    /// We store the raw pointer to the I2C bus to reconstruct the Box in `drop`.
+    /// This ensures the memory is properly deallocated.
+    i2c_bus_ptr: *mut I2cBus,
 }
 
 impl Vl53l5cx {
     /// Creates a new driver instance and initializes the sensor.
     ///
-    /// This function takes ownership of the I2C bus, initializes the platform.
-    /// layer, and then calls the C driver's `vl53l5cx_init` function.
+    /// This function takes ownership of the I2C bus, initializes the platform layer,
+    /// and then calls the C driver's `vl53l5cx_init` function.
     pub fn new(
         i2c_bus: Box<dyn I2c<SevenBitAddress, Error = platform::PlatformError> + Send>,
     ) -> Result<Self, DriverError> {
-        // 1. Initialize our platform by giving it the I2C bus.
-        //    This must be done *before* any C driver functions are called.
-        platform::set_i2c_bus(i2c_bus);
+        // 1. Create the C configuration struct on the heap.
+        let mut config: Box<bindings::VL53L5CX_Configuration> =
+            Box::new(unsafe { core::mem::zeroed() });
 
-        // 2. Create the C configuration struct on the heap.
-        let mut config: Box<bindings::VL53L5CX_Configuration> = Box::new(unsafe { core::mem::zeroed() });
+        // Convert the Box into a raw pointer. This gives us a stable memory address
+        // that we can pass to C, while preventing the Box from being dropped.
+        let i2c_bus_ptr = Box::into_raw(i2c_bus);
+
+        // 2. The C driver's platform struct has a `p_com` field that we can use
+        //    to store a pointer to our I2C bus trait object.
+        let platform_ptr = &mut config.platform as *mut _ as *mut platform::VL53L5CX_Platform;
+        unsafe {
+            (*platform_ptr).p_com = i2c_bus_ptr as *mut std::ffi::c_void;
+        }
 
         // 3. Call the C API to initialize the sensor.
-        //    This is `unsafe` because we are calling a C function and
-        //    passing a raw pointer to our config struct.
+        //    This is `unsafe` because we are calling a C function and passing
+        //    a raw pointer to our config struct.
         let status = unsafe { bindings::vl53l5cx_init(config.as_mut()) };
 
-        // 4. Check the status code and return a proper Rust `Result`. Map
-        //    the platform-specific I2C error code to our new error variant.
-        Self::check_status(status).map(|_| Self { config })
+        // 4. Check the status code and return a proper Rust `Result`.
+        Self::check_status(status).map(|_| Self {
+            config,
+            i2c_bus_ptr,
+        })
     }
 
     /// Checks if the sensor is alive and ready on the I2C bus.
@@ -125,21 +141,23 @@ impl Vl53l5cx {
     }
 }
 
+// We must implement Drop to properly clean up the `Box<dyn I2c>` that we
+// converted into a raw pointer. Failure to do so would result in a memory leak.
+impl Drop for Vl53l5cx {
+    fn drop(&mut self) {
+        // Reconstruct the Box from the raw pointer and let it be dropped,
+        // which deallocates the memory for our I2C bus object.
+        unsafe {
+            let _ = Box::from_raw(self.i2c_bus_ptr);
+        }
+    }
+}
+
 // The C struct `VL53L5CX_Configuration` does not derive Default.
 // We need to implement it manually.
 impl Default for bindings::VL53L5CX_Configuration {
     fn default() -> Self {
         // Safe way to create a zero-initialized struct.
         unsafe { core::mem::zeroed() }
-    }
-}
-
-// When our Vl53l5cx struct is dropped, we should ensure the C driver's
-// platform termination function is called to clean up.
-impl Drop for Vl53l5cx {
-    fn drop(&mut self) {
-        // Release the I2C bus from the global static context in `platform.rs`.
-        // This is good RAII practice.
-        platform::terminate_platform();
     }
 }
