@@ -7,7 +7,10 @@
 
 A platform-agnostic Rust driver for the **STMicroelectronics VL53L5CX** Time-of-Flight (ToF) multi-zone ranging sensor.
 
-This crate acts as a high-level wrapper around the official ST Ultra Lite Driver (ULD), utilizing `embedded-hal` traits to allow usage on any supported microcontroller (STM32, ESP32, nRF, RP2040, etc.) or Linux.
+This crate acts as a high-level wrapper around the official ST Ultra Lite Driver (ULD), utilizing `embedded-hal` traits to allow usage on:
+* **Microcontrollers:** STM32, ESP32, nRF52, RP2040, etc. (`no_std`)
+* **Linux:** Raspberry Pi, Jetson Nano, etc. (`std`)
+* **Windows / macOS:** Via USB-to-I2C adapters (FT232H, MCP2221) using crates like `ftdi-embedded-hal`.
 
 ## Features
 
@@ -78,6 +81,8 @@ Instead of rewriting the complex ranging algorithms from scratch, this crate emb
 graph TD
     User[User Application] --> RustAPI[VL53L5CX-FFI]
     RustAPI -- "embedded-hal traits" --> HAL[I2C & Delay]
+    HAL -- "Linux / Windows" --> OS["OS Drivers (I2C-Dev / FTDI)"]
+    HAL -- "Bare Metal" --> MCU[Microcontroller Peripherals]
     RustAPI -- "FFI Calls" --> C_Driver[ST ULD C-Driver]
     C_Driver -- "Raw Logic" --> Sensor[VL53L5CX Hardware]
     
