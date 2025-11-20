@@ -63,7 +63,7 @@ uint8_t vl53l5cx_platform_wait_ms(VL53L5CX_Platform *p_platform, uint32_t time_m
 	vl53l5cx_platform_read(p, index, data, count)
 
 #define VL53L5CX_WaitMs(p, time) \
-	vl53l5cx_platform_sleep(time)
+	vl53l5cx_platform_wait_ms(p, time)
 
 #define VL53L5CX_SwapBuffer(buffer, length) \
 	{ \

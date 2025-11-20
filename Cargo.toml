@@ -2,6 +2,7 @@
 name = "vl53l5cx-ffi"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Ensure embedded-hal is version 1.0.0
@@ -9,7 +10,6 @@ embedded-hal = "1.0.0"
 
 # Add these missing dependencies
 once_cell = "1.19.0"
-thiserror = "1.0.63"
 
 # These are for the example binary
 anyhow = { version = "1.0.86", optional = true }
@@ -20,6 +20,8 @@ cc = "1.0.101"
 bindgen = "0.69.5"
 
 [features]
-# A feature to enable building the example
-default = []
+default = ["std"]
+# The `std` feature enables functionality that requires the standard library, such as `std::thread::sleep`. This is enabled by default.
+std = []
+# The `example` feature enables dependencies required for running the examples.
 example = ["dep:anyhow", "dep:i2cdev"]

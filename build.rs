@@ -8,7 +8,6 @@ fn main() {
     // List of C source files to compile
     let c_sources = vec![
         driver_dir.join("vl53l5cx_api.c"),
-        driver_dir.join("vl53l5cx_buffers.c"),
         driver_dir.join("vl53l5cx_plugin_motion_indicator.c"),
         driver_dir.join("vl53l5cx_plugin_xtalk.c"),
     ];
