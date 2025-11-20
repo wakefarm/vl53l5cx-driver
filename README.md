@@ -80,16 +80,19 @@ Instead of rewriting the complex ranging algorithms from scratch, this crate emb
 ```mermaid
 graph TD
     User[User Application] --> RustAPI[VL53L5CX-FFI]
-    RustAPI -- "embedded-hal traits" --> HAL[I2C & Delay]
-    HAL -- "Linux / Windows" --> OS["OS Drivers (I2C-Dev / FTDI)"]
-    HAL -- "Bare Metal" --> MCU[Microcontroller Peripherals]
-    RustAPI -- "FFI Calls" --> C_Driver[ST ULD C-Driver]
-    C_Driver -- "Raw Logic" --> Sensor[VL53L5CX Hardware]
     
     subgraph "Crate Boundary"
-    RustAPI
-    C_Driver
+    RustAPI -- "1. Calls C API" --> C_Driver[ST ULD C-Driver]
+    C_Driver -- "2. Calls Platform FFI" --> RustPlatform[Rust Platform Shim]
     end
+
+    RustPlatform -- "3. Uses Traits" --> HAL[I2C & Delay Traits]
+    
+    HAL -- "Linux / Windows" --> OS["OS Drivers (I2C-Dev / FTDI)"]
+    HAL -- "Bare Metal" --> MCU[Microcontroller Peripherals]
+    
+    OS --> Sensor[VL53L5CX Hardware]
+    MCU --> Sensor
 ```
 
 ### Key Concepts:
