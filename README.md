@@ -28,12 +28,17 @@ Add this to your `Cargo.toml`:
 vl53l5cx-ffi = "0.1.0"
 ```
 
+### Requirements
+* **Rust:** Stable toolchain
+* **C Compiler:** A compatible C compiler must be installed (e.g., `gcc`, `clang`, or MSVC).
+* **LLVM/Clang:** Required by `bindgen` to generate bindings.
+
 ## Usage
 
 Note that while the crate name uses dashes (`-`), the library is imported using underscores (`_`) in your Rust code.
 
 ```rust
-use vl53l5cx_ffi::{Vl53l5cx, bindings, platform::PlatformError};
+use vl53l5cx_ffi::{Vl53l5cx, Resolution, VL53L5CX_ResultsData, platform::PlatformError};
 use embedded_hal::{i2c::{I2c, SevenBitAddress}, delay::DelayNs};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 4. Check communication and configure
     if sensor.is_alive()? {
-        sensor.set_resolution(bindings::VL53L5CX_RESOLUTION_8X8)?;
+        sensor.set_resolution(Resolution::Res8x8)?;
         sensor.set_ranging_frequency_hz(15)?;
         
         sensor.start_ranging()?;
@@ -60,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             // Poll for data ready
             if sensor.check_data_ready()? {
-                let results = sensor.get_ranging_data()?; // results is VL53L5CX_ResultsData
+                let results: VL53L5CX_ResultsData = sensor.get_ranging_data()?;
                 // Process ranging data...
                 // println!("Zone 0 Distance: {} mm", results.distance_mm[0]);
             }
