@@ -2,7 +2,11 @@
 name = "vl53l5cx-sys"
 version = "0.1.0"
 edition = "2021"
-links = "vl53l5cx_uld" # <-- This line was already present, no change needed.
+description = "Low-level FFI bindings for the STMicroelectronics VL53L5CX Ultra Lite Driver (ULD)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wakefarm/vl53l5cx-driver"
+documentation = "https://docs.rs/vl53l5cx-driver"
+links = "vl53l5cx_uld"
 
 [dependencies]
 cty = "0.2"

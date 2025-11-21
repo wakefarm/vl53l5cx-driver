@@ -3,6 +3,7 @@ name = "vl53l5cx-driver"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "A platform-agnostic Rust driver for the STMicroelectronics VL53L5CX Time-of-Flight sensor."
 repository = "https://github.com/wakefarm/vl53l5cx-driver"
 documentation = "https://docs.rs/vl53l5cx-driver"
 
