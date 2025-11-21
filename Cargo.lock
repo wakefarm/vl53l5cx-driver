@@ -95,6 +95,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cty"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -337,15 +343,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9312f7c4f6ff9069b165498234ce8be658059c6728633667c526e27dc2cf1df5"
 
 [[package]]
-name = "vl53l5cx-ffi"
+name = "vl53l5cx-driver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bindgen",
- "cc",
  "embedded-hal",
  "i2cdev",
- "once_cell",
+ "vl53l5cx-sys",
+]
+
+[[package]]
+name = "vl53l5cx-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "cc",
+ "cty",
 ]
 
 [[package]]

@@ -50,6 +50,31 @@ fn main() {
         bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_MOTION_INDICATOR");
     }
 
+    // --- Configuration for Cross-Compilation ---
+    let target = env::var("TARGET").unwrap();
+    if target.starts_with("armv7-unknown-linux-") {
+        // When cross-compiling, both `cc` and `bindgen` need to know where the
+        // target's C standard library headers are. We can ask the C compiler for its sysroot.
+        let compiler = cc_build.get_compiler();
+        let output = std::process::Command::new(compiler.path())
+            .arg("-print-sysroot")
+            .output()
+            .expect("Failed to execute C compiler to get sysroot");
+
+        if !output.status.success() {
+            panic!(
+                "C compiler failed to report sysroot. stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let sysroot = String::from_utf8(output.stdout).unwrap().trim().to_string();
+
+        bindgen_builder = bindgen_builder
+            .clang_arg(format!("--sysroot={}", sysroot))
+            .clang_arg(format!("--target={}", target));
+    }
+
     // Compile the C sources into a static library
     cc_build
         .files(c_sources)
@@ -75,6 +100,8 @@ fn main() {
         // Also define the macros for bindgen's C parser.
         .clang_arg(format!("-DVL53L5CX_NB_TARGET_PER_ZONE={}", nb_targets))
         .clang_arg("-DUSE_ULP_PLATFORM=1")
+        // Generate no_std compatible bindings
+        .use_core()
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
@@ -82,6 +109,7 @@ fn main() {
         .allowlist_function("vl53l5cx_.*")
         .allowlist_type("VL53L5CX_.*")
         .allowlist_var("VL53L5CX_.*")
+        .allowlist_var("VL53L5CX_XTALK_BUFFER_SIZE") // Ensure this const is always generated
         .generate()
         .expect("Unable to generate bindings");
 

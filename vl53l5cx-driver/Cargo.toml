@@ -1,0 +1,28 @@
+[package]
+name = "vl53l5cx-driver"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wakefarm/vl53l5cx-driver"
+documentation = "https://docs.rs/vl53l5cx-driver"
+
+[dependencies]
+embedded-hal = "1.0.0"
+vl53l5cx-sys = { path = "../vl53l5cx-sys", version = "0.1.0" } # Ensure version is set for publish
+
+[dev-dependencies]
+anyhow = "1.0.100"
+i2cdev = "0.6.2"
+
+[features]
+default = []
+std = []
+
+xtalk = ["vl53l5cx-sys/xtalk"]
+motion = ["vl53l5cx-sys/motion"]
+thresholds = ["vl53l5cx-sys/thresholds"]
+
+targets-1 = []
+targets-2 = []
+targets-3 = []
+targets-4 = []

@@ -1,0 +1,17 @@
+[package]
+name = "vl53l5cx-sys"
+version = "0.1.0"
+edition = "2021"
+links = "vl53l5cx_uld" # <-- This line was already present, no change needed.
+
+[dependencies]
+cty = "0.2"
+
+[build-dependencies]
+bindgen = "0.69"
+cc = "1.2"
+
+[features]
+xtalk = []
+motion = []
+thresholds = []

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use embedded_hal::{delay::DelayNs, i2c::{I2c, SevenBitAddress}};
 use i2cdev::linux::LinuxI2cDev;
-use vl53l5cx_ffi::{platform::PlatformError, Vl53l5cx, bindings};
+use vl53l5cx_driver::{platform::PlatformError, Vl53l5cx, Resolution};
 
 /// A simple delay provider for `std` environments that uses `thread::sleep`.
 struct StdDelay;
@@ -44,7 +44,7 @@ fn main() -> Result<()> {
     }
 
     // 6. Configure for Conveyor (8x8, 15Hz)
-    sensor.set_resolution(bindings::VL53L5CX_RESOLUTION_8X8)?;
+    sensor.set_resolution(Resolution::Res8x8)?;
     sensor.set_ranging_frequency_hz(15)?;
     
     println!("Configuration applied. Ready for Volume Analysis.");
