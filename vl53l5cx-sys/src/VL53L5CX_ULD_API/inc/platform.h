@@ -43,6 +43,12 @@ typedef struct
 	void* p_com;
 } VL53L5CX_Platform;
 
+/*
+ * The macro VL53L5CX_COMMS_CHUNK_SIZE can be used to define the size of the buffer
+ * to use for I2C communications.
+ */
+#define VL53L5CX_COMMS_CHUNK_SIZE  256
+
 uint8_t vl53l5cx_platform_init(VL53L5CX_Platform *p_platform);
 uint8_t vl53l5cx_platform_terminate(VL53L5CX_Platform *p_platform);
 uint8_t vl53l5cx_platform_write(VL53L5CX_Platform *p_platform, uint16_t address, uint8_t *p_values, uint32_t size);

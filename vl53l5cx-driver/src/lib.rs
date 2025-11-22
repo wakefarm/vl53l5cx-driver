@@ -1,526 +1,393 @@
-#![cfg_attr(not(feature = "std"), no_std)]
-//! A platform-agnostic Rust driver for the STMicroelectronics VL53L5CX Time-of-Flight (ToF) 8x8 multizone ranging sensor.
-//!
-//! This crate provides a safe, idiomatic Rust interface to the official ST Ultra Lite Driver (ULD) C-API.
-//!
-//! # Firmware Upload
-//! The VL53L5CX sensor does not have persistent on-chip memory for its firmware. It requires a firmware blob (~90KB)
-//! to be loaded into its RAM via I2C during initialization. This driver handles the firmware upload automatically
-//! when you call the [`Vl53l5cx::new`] constructor.
-//!
-//! # More Information and Datasheet
-//! For complete details on the sensor's capabilities, please refer to the STMicroelectronics VL53L5CX Datasheet.
+#![no_std]
+/*!
+A platform-agnostic driver for the VL53L5CX Time-of-Flight sensor.
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
+This driver is built on top of the `embedded-hal` traits and uses the official
+ST Microelectronics VL53L5CX ULD (Ultra Lite Driver) via the `vl53l5cx-sys` crate.
 
-use embedded_hal::{delay::DelayNs, i2c::{I2c, SevenBitAddress}};
+## Features
+- `std`: Enables `std::error::Error` implementation for the `Error` type.
+- `xtalk`: Enables cross-talk calibration functions.
+- `motion`: Enables motion indicator functions.
 
-// Use the external sys-crate for C bindings.
-use vl53l5cx_sys::{self as bindings, wrappers};
+## Usage
 
-// Re-export the most commonly used structs.
-pub use bindings::{VL53L5CX_DetectionThresholds, VL53L5CX_Motion_Configuration, VL53L5CX_ResultsData};
+A typical initialization sequence for a single sensor looks like this:
 
-// Include the platform glue module.
-pub mod platform;
+```no_run
+# use embedded_hal::i2c::I2c;
+# use embedded_hal::delay::DelayNs;
+# use embedded_hal::digital::OutputPin;
+# use vl53l5cx_driver::{Vl53l5cx, Error};
+# fn main() -> Result<(), Error<()>> {
+# let i2c = (); let delay = (); let lpn_pin = ();
+let mut sensor = Vl53l5cx::new(i2c, delay).with_reset(lpn_pin);
+sensor.init()?;
+# Ok(())
+# }
+```
+*/
 
-/// The size of the Xtalk calibration data buffer.
-#[cfg(feature = "xtalk")]
-pub const VL53L5CX_XTALK_BUFFER_SIZE: usize = 776;
+use embedded_hal::delay::DelayNs;
+use embedded_hal::i2c::{I2c, SevenBitAddress};
+use embedded_hal::digital::OutputPin;
+pub use vl53l5cx_sys as sys;
 
-// --- TRAIT DEFINITION ---
-/// A trait to abstract away the generic `I` and `D` types for the C callback.
-pub trait PlatformTrait<'a> {
-    fn write(&mut self, addr: u8, data: &[u8]) -> Result<(), platform::PlatformError>;
-    fn write_read(&mut self, addr: u8, wr_buf: &[u8], rd_buf: &mut [u8]) -> Result<(), platform::PlatformError>;
-    fn delay_ms(&mut self, ms: u32);
-}
+/// The default I2C address of the VL53L5CX sensor.
+pub const DEFAULT_ADDRESS: u8 = 0x29;
 
-#[derive(Debug)]
-pub enum SensorStatus {
-    Ok,
-    TimeoutError,
-    CorruptedFrame,
-    CrcCsumFailed,
-    XtalkFailed,
-    McuError,
-    InvalidParam,
-    Unknown(u8),
-}
-
-impl From<u8> for SensorStatus {
-    fn from(code: u8) -> Self {
-        match code {
-            0 => SensorStatus::Ok,
-            1 => SensorStatus::TimeoutError,
-            2 => SensorStatus::CorruptedFrame,
-            3 => SensorStatus::CrcCsumFailed,
-            4 => SensorStatus::XtalkFailed,
-            66 => SensorStatus::McuError,
-            127 => SensorStatus::InvalidParam,
-            c => SensorStatus::Unknown(c),
-        }
-    }
-}
-
-#[derive(Debug)]
-#[repr(u8)]
-pub enum Resolution {
-    Res4x4 = 16,
-    Res8x8 = 64,
-}
-
-#[derive(Debug)]
-#[repr(u8)]
-pub enum TargetOrder {
-    Closest = 1,
-    Strongest = 2,
-}
-
-#[derive(Debug, Copy, Clone)]
-#[repr(u8)]
-pub enum PowerMode {
-    Sleep = 0,
-    Wakeup = 1,
-}
-
-#[derive(Debug)]
-#[repr(u8)]
-pub enum RangingMode {
-    Continuous = 1,
-    Autonomous = 3,
-}
-
-#[derive(Debug)]
-pub enum DriverError {
-    I2c,
-    Sensor(SensorStatus),
-}
-
-impl core::fmt::Display for DriverError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            DriverError::I2c => write!(f, "I2C communication error"),
-            DriverError::Sensor(status) => write!(f, "Sensor driver error: {:?}", status),
-        }
-    }
-}
-
-/// A newtype wrapper to ensure the sharpener percentage is within the valid range (0-99).
-#[derive(Debug, Copy, Clone)]
-pub struct SharpenerPercent(u8);
-
-impl SharpenerPercent {
-    pub fn new(percent: u8) -> Option<Self> {
-        if percent <= 99 { Some(Self(percent)) } else { None }
-    }
-    pub fn value(&self) -> u8 { self.0 }
-}
-
-/// Represents a VL53L5CX sensor instance.
+/// A placeholder type for an unconfigured hardware pin.
 ///
-/// # Memory Safety
-/// **Important:** This struct contains self-referential pointers required for the underlying C driver's callback mechanism.
-/// It **MUST NOT** be moved in memory after it is created. If you need to store it in another struct,
-/// you must use a stable pointer like `Box::pin`.
-pub struct Vl53l5cx<'a, I, D>
-where
-    I: I2c<SevenBitAddress> + 'a,
-    D: DelayNs + 'a,
-{
-    /// The ST driver configuration struct.
-    config: bindings::VL53L5CX_Configuration,
-    /// The I2C bus.
-    pub i2c: I,
-    /// The delay provider.
-    pub delay: D,
-    
-    /// Internal storage for the Trait Object pointer (Fat Pointer).
-    // FIX: Added `+ 'a` to explicitly allow non-static lifetimes
-    proxy: *mut (dyn PlatformTrait<'a> + 'a),
+/// This is used as the default generic parameter for the `reset_pin` and `int_pin`
+/// in the `Vl53l5cx` struct, making them optional.
+pub struct NoPin;
+
+/// Implements the `ErrorType` for `NoPin`, indicating that its operations are infallible.
+impl embedded_hal::digital::ErrorType for NoPin {
+    type Error = core::convert::Infallible;
 }
 
-impl<'a, I, D> Vl53l5cx<'a, I, D>
-where
-    I: I2c<SevenBitAddress> + 'a,
-    D: DelayNs + 'a,
-{
-    /// Creates a new driver instance, initializes the sensor, and uploads the firmware.
-    ///
-    /// This function performs the complete sensor initialization, which includes a lengthy I2C transaction
-    /// to load the ~90KB firmware into the sensor's RAM.
-    ///
-    /// # Warning
-    /// Due to internal pointers used for C callbacks, the returned `Vl53l5cx` struct **MUST NOT** be moved in memory.
-    pub fn new(i2c: I, delay: D, address: u8) -> Result<Self, DriverError> {
-        // FIX: Updated cast to include `+ 'a`
-        let null_fat_ptr = core::ptr::null_mut::<Self>() as *mut (dyn PlatformTrait<'a> + 'a);
+/// Implements `OutputPin` for `NoPin` as a no-op.
+/// This allows the driver to compile and function even when an optional pin is not provided,
+/// by satisfying the trait bounds on methods like `init()`.
+impl embedded_hal::digital::OutputPin for NoPin {
+    fn set_low(&mut self) -> Result<(), Self::Error> { Ok(()) }
+    fn set_high(&mut self) -> Result<(), Self::Error> { Ok(()) }
+}
 
-        let mut sensor = Self {
-            config: unsafe { core::mem::zeroed() },
+/// Represents errors that can occur in the driver.
+#[derive(Debug)]
+pub enum Error<E> {
+    /// An error from the underlying I2C bus.
+    I2c(E),
+    /// The sensor is not alive on the bus.
+    NotAlive,
+    /// An error status was returned by the sensor's firmware.
+    Firmware(u8),
+    /// A required hardware pin (like reset) was not provided.
+    PinMissing,
+}
+
+#[cfg(feature = "std")]
+impl<E: std::error::Error + 'static> std::error::Error for Error<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::I2c(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<E: std::fmt::Debug> std::fmt::Display for Error<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::I2c(e) => write!(f, "I2C error: {:?}", e),
+            Error::NotAlive => write!(f, "Sensor not found at address"),
+            Error::Firmware(status) => write!(f, "Firmware error, status: {}", status),
+            Error::PinMissing => write!(f, "A required hardware pin was not configured"),
+        }
+    }
+}
+
+/// The main driver struct for the VL53L5CX sensor.
+///
+/// It is generic over the I2C bus, a delay provider, a reset pin (LPn), and an
+/// interrupt pin (INT). The pins are optional and can be added using the builder
+/// pattern (`with_reset`, `with_interrupt`).
+pub struct Vl53l5cx<I2C, D, RST = NoPin, INT = NoPin> {
+    i2c: I2C,
+    delay: D,
+    address: SevenBitAddress,
+    reset_pin: RST,
+    int_pin: INT,
+    has_reset: bool,
+    /// Internal driver state.
+    stdev: sys::VL53L5CX_Configuration,
+}
+
+/// Constructor and builder methods.
+impl<I2C, D> Vl53l5cx<I2C, D, NoPin, NoPin>
+where
+    I2C: I2c,
+    D: DelayNs,
+{
+    /// Creates a new driver instance with the default I2C address.
+    /// This function is lightweight and does not perform any I2C communication.
+    ///
+    /// # Arguments
+    /// * `i2c` - An `embedded-hal` I2C bus implementation.
+    /// * `delay` - An `embedded-hal` delay provider.
+    pub fn new(i2c: I2C, delay: D) -> Self {
+        Self {
             i2c,
             delay,
-            proxy: null_fat_ptr, 
-        };
-
-        // 1. Create the Fat Pointer to `self` (as a Trait Object)
-        // FIX: Updated type annotation to include `+ 'a`
-        let proxy_ptr: *mut (dyn PlatformTrait<'a> + 'a) = &mut sensor;
-        
-        // 2. Store this Fat Pointer inside the struct itself
-        sensor.proxy = proxy_ptr;
-
-        // 3. Configure the C struct to point to our `proxy` field.
-        let platform_ptr = &mut sensor.config.platform as *mut _ as *mut platform::VL53L5CX_Platform;
-        unsafe {
-            (*platform_ptr).p_com = &mut sensor.proxy as *mut _ as *mut core::ffi::c_void;
-            (*platform_ptr).address = address as u16;
-            
-            // Call C init
-            let status = wrappers::init(&mut sensor.config);
-            Self::check_ok(status)?;
+            address: DEFAULT_ADDRESS,
+            reset_pin: NoPin,
+            int_pin: NoPin,
+            has_reset: false,
+            // Initialize the ST driver state. This is a large struct.
+            stdev: unsafe { core::mem::zeroed() },
         }
-
-        Ok(sensor)
-    }
-
-    /// Returns the version string of the underlying ST ULD C-driver.
-    ///
-    /// The version is retrieved from the `VL53L5CX_API_REVISION` C-macro defined
-    /// in the vendor's source code.
-    pub fn get_version(&self) -> Result<&'static str, DriverError> {
-        // The `refresh_pointers` call is not strictly necessary here as we are not using the platform callbacks,
-        // but it is good practice to include for consistency.
-        // self.refresh_pointers();
-        let c_str = unsafe {
-            // SAFETY: The binding guarantees that VL53L5CX_API_REVISION points to a valid, null-terminated C string.
-            core::ffi::CStr::from_bytes_with_nul_unchecked(bindings::VL53L5CX_API_REVISION)
-        };
-        // Note: The conversion from CStr to &str is Fallible, but the ST version string is ASCII.
-        let version_str = c_str.to_str().unwrap_or("Unknown Version");
-        Ok(version_str)
-    }
-
-    /// Updates the C driver's internal pointers to point to the current memory location of this struct.
-    /// This must be called before any C function if the struct has moved.
-    fn refresh_pointers(&mut self) {
-        unsafe {
-            // 1. Point proxy to the current address of self
-            let proxy_ptr: *mut (dyn PlatformTrait<'a> + 'a) = self;
-            self.proxy = proxy_ptr;
-
-            // 2. Point C platform.p_com to the current address of self.proxy
-            let platform_ptr = &mut self.config.platform as *mut bindings::VL53L5CX_Platform;
-            (*platform_ptr).p_com = &mut self.proxy as *mut _ as *mut core::ffi::c_void;
-        }
-    }
-
-    /// Checks if the sensor is alive and responding.
-    ///
-    /// This function reads the sensor's device and revision IDs. A successful read
-    /// returning the expected ID (`0xF0` for device, `0x02` for revision) indicates
-    /// that the sensor is powered and communicating correctly.
-    pub fn is_alive(&mut self) -> Result<bool, DriverError> {
-        self.refresh_pointers();
-        let (status, is_alive) = wrappers::is_alive(&mut self.config);
-        Self::check_ok(status).map(|_| is_alive != 0)
-    }
-
-    /// Sets a new I2C address for the sensor.
-    ///
-    /// # Note
-    /// The new address is temporary and will be reset to the default (`0x29`)
-    /// when the sensor is power-cycled.
-    pub fn set_i2c_address(&mut self, address: u8) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_i2c_address(&mut self.config, address as u16);
-        Self::check_ok(status)
-    }
-
-    /// Sets the sensor's ranging resolution.
-    ///
-    /// This setting impacts the maximum possible ranging frequency:
-    /// - `Resolution::Res4x4` (16 zones): Max 60Hz
-    /// - `Resolution::Res8x8` (64 zones): Max 15Hz
-    pub fn set_resolution(&mut self, resolution: Resolution) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_resolution(&mut self.config, resolution as u8);
-        Self::check_ok(status)
-    }
-
-    /// Sets the ranging frequency in Hz.
-    ///
-    /// The maximum frequency depends on the configured resolution:
-    /// - `Resolution::Res4x4`: 1Hz to 60Hz
-    /// - `Resolution::Res8x8`: 1Hz to 15Hz
-    pub fn set_ranging_frequency_hz(&mut self, frequency: u8) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_ranging_frequency_hz(&mut self.config, frequency);
-        Self::check_ok(status)
-    }
-
-    /// Gets the current sharpener percentage.
-    pub fn get_sharpener_percent(&mut self) -> Result<u8, DriverError> {
-        self.refresh_pointers();
-        let (status, sharpener_percent) = wrappers::get_sharpener_percent(&mut self.config);
-        Self::check_ok(status).map(|_| sharpener_percent)
-    }
-
-    /// Sets the sharpener percentage.
-    ///
-    /// The sharpener is an edge-detection filter that can help distinguish targets.
-    /// The valid range is 0% (disabled) to 99%.
-    pub fn set_sharpener_percent(&mut self, percent: SharpenerPercent) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_sharpener_percent(&mut self.config, percent.value());
-        Self::check_ok(status)
-    }
-
-    /// Gets the current target order.
-    /// The target order determines which target is reported when multiple are detected in a zone.
-    pub fn get_target_order(&mut self) -> Result<TargetOrder, DriverError> {
-        self.refresh_pointers();
-        let (status, target_order) = wrappers::get_target_order(&mut self.config);
-        Self::check_ok(status).map(|_| match target_order {
-            1 => TargetOrder::Closest,
-            2 => TargetOrder::Strongest,
-            _ => TargetOrder::Closest,
-        })
-    }
-
-    /// Sets the target order.
-    /// By default, the sensor is configured with `TargetOrder::Strongest`.
-    pub fn set_target_order(&mut self, target_order: TargetOrder) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_target_order(&mut self.config, target_order as u8);
-        Self::check_ok(status)
-    }
-
-    /// Stops the current ranging session.
-    /// This must be used when the sensor is streaming, after calling `start_ranging()`.
-    pub fn stop_ranging(&mut self) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::stop_ranging(&mut self.config);
-        Self::check_ok(status)
-    }
-
-    /// Sets the sensor's power mode.
-    ///
-    /// - `PowerMode::Sleep`: Puts the sensor in a low-power state, retaining firmware and configuration.
-    /// - `PowerMode::Wakeup`: Wakes the sensor from sleep mode.
-    /// Ensure the device is not streaming before calling this function.
-    pub fn set_power_mode(&mut self, power_mode: PowerMode) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_power_mode(&mut self.config, power_mode as u8);
-        Self::check_ok(status)
-    }
-
-    /// Gets the current power mode of the sensor.
-    pub fn get_power_mode(&mut self) -> Result<PowerMode, DriverError> {
-        self.refresh_pointers();
-        let (status, power_mode) = wrappers::get_power_mode(&mut self.config);
-        Self::check_ok(status).map(|_| match power_mode {
-            0 => PowerMode::Sleep,
-            _ => PowerMode::Wakeup,
-        })
-    }
-
-    /// Sets the integration time in milliseconds.
-    ///
-    /// This function allows manual control over the sensor's exposure time.
-    /// The valid range is from 2ms to 1000ms.
-    pub fn set_integration_time_ms(&mut self, integration_time_ms: u32) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_integration_time_ms(&mut self.config, integration_time_ms);
-        Self::check_ok(status)
-    }
-
-    /// Gets the current integration time in milliseconds.
-    pub fn get_integration_time_ms(&mut self) -> Result<u32, DriverError> {
-        self.refresh_pointers();
-        let (status, integration_time_ms) = wrappers::get_integration_time_ms(&mut self.config);
-        Self::check_ok(status).map(|_| integration_time_ms)
-    }
-
-    /// Gets the current ranging mode.
-    /// The default mode is `Autonomous`.
-    pub fn get_ranging_mode(&mut self) -> Result<RangingMode, DriverError> {
-        self.refresh_pointers();
-        let (status, ranging_mode) = wrappers::get_ranging_mode(&mut self.config);
-        Self::check_ok(status).map(|_| match ranging_mode {
-            1 => RangingMode::Continuous,
-            3 => RangingMode::Autonomous,
-            _ => RangingMode::Continuous,
-        })
-    }
-
-    /// Sets the ranging mode.
-    ///
-    /// - `RangingMode::Continuous`: The sensor continuously acquires frames at the maximum possible speed.
-    /// - `RangingMode::Autonomous`: The sensor acquires frames based on the configured ranging frequency.
-    ///   This mode allows for a precise integration time to be set.
-    pub fn set_ranging_mode(&mut self, ranging_mode: RangingMode) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_ranging_mode(&mut self.config, ranging_mode as u8);
-        Self::check_ok(status)
-    }
-
-    /// Gets the number of frames between automatic temperature compensations (VHV calibration).
-    pub fn get_vhv_repeat_count(&mut self) -> Result<u32, DriverError> {
-        self.refresh_pointers();
-        let (status, repeat_count) = wrappers::get_vhv_repeat_count(&mut self.config);
-        Self::check_ok(status).map(|_| repeat_count)
-    }
-
-    /// Sets the number of frames between automatic temperature compensations (VHV calibration).
-    ///
-    /// Setting a `repeat_count` other than 0 will cause the firmware to automatically run a
-    /// temperature calibration every `N` frames.
-    ///
-    /// Setting to `0` disables this feature (default).
-    pub fn set_vhv_repeat_count(&mut self, repeat_count: u32) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_vhv_repeat_count(&mut self.config, repeat_count);
-        Self::check_ok(status)
-    }
-
-    /// Enables the internal VCSEL charge pump.
-    /// This is enabled by default.
-    pub fn enable_internal_cp(&mut self) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::enable_internal_cp(&mut self.config);
-        Self::check_ok(status)
-    }
-
-    /// Disables the internal VCSEL charge pump to optimize power consumption.
-    ///
-    /// # Warning
-    /// This function should only be used if the analog supply voltage (AVDD) is 3.3V.
-    pub fn disable_internal_cp(&mut self) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::disable_internal_cp(&mut self.config);
-        Self::check_ok(status)
-    }
-
-    /// Starts a ranging session. The ranging mode must be configured before this call.
-    ///
-    /// This function locks the sensor's configuration and begins the measurement process.
-    /// After calling this, you can poll for new data using `check_data_ready()`.
-    pub fn start_ranging(&mut self) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::start_ranging(&mut self.config);
-        Self::check_ok(status)
-    }
-
-    /// Checks if a new set of ranging data is ready to be read from the sensor.
-    ///
-    /// This function is typically used in a polling loop to wait for new measurements.
-    ///
-    /// ```rust,no_run
-    /// # use vl53l5cx_driver::{Vl53l5cx, DriverError};
-    /// # fn poll(sensor: &mut Vl53l5cx<impl embedded_hal::i2c::I2c, impl embedded_hal::delay::DelayNs>) -> Result<(), DriverError> {
-    /// while !sensor.check_data_ready()? {
-    ///     // Wait or yield
-    /// }
-    /// let results = sensor.get_ranging_data()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn check_data_ready(&mut self) -> Result<bool, DriverError> {
-        self.refresh_pointers();
-        let (status, is_ready) = wrappers::check_data_ready(&mut self.config);
-        Self::check_ok(status).map(|_| is_ready != 0)
-    }
-
-    /// Gets the latest ranging data from the sensor.
-    ///
-    /// This function retrieves a `VL53L5CX_ResultsData` struct containing the measurement
-    /// results for all zones, which includes:
-    /// - `distance_mm`: Distance to the target in millimeters.
-    /// - `signal_per_spad`: Signal rate of the reflected light.
-    /// - `ambient_per_spad`: Ambient light noise rate.
-    /// - And other diagnostic data.
-    pub fn get_ranging_data(&mut self) -> Result<bindings::VL53L5CX_ResultsData, DriverError> {
-        self.refresh_pointers();
-        let (status, results) = wrappers::get_ranging_data(&mut self.config);
-        Self::check_ok(status).map(|_| results)
-    }
-
-    #[cfg(feature = "xtalk")]
-    /// Performs a crosstalk (Xtalk) calibration.
-    /// This should be done if the sensor is placed behind a protective cover glass.
-    /// The target must be placed at a distance between 600mm and 3000mm.
-    pub fn calibrate_xtalk(&mut self, reflectance_percent: u16, distance_mm: u16, nb_samples: u8) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::calibrate_xtalk(&mut self.config, reflectance_percent, nb_samples, distance_mm);
-        Self::check_ok(status)
-    }
-
-    #[cfg(feature = "xtalk")]
-    /// Retrieves the crosstalk calibration data from the sensor's RAM.
-    /// The returned `alloc::vec::Vec<u8>` can be stored in non-volatile memory for later use with `set_caldata_xtalk`.
-    pub fn get_caldata_xtalk(&mut self) -> Result<alloc::vec::Vec<u8>, DriverError> {
-        self.refresh_pointers();
-        let mut xtalk_data = alloc::vec::Vec::with_capacity(VL53L5CX_XTALK_BUFFER_SIZE);
-        unsafe { xtalk_data.set_len(VL53L5CX_XTALK_BUFFER_SIZE); }
-        let status = wrappers::get_caldata_xtalk(&mut self.config, xtalk_data.as_mut_ptr());
-        Self::check_ok(status).map(|_| xtalk_data)
-    }
-
-    #[cfg(feature = "xtalk")]
-    /// Writes a previously saved crosstalk calibration buffer to the sensor.
-    /// This avoids the need to run a new calibration on every power-up.
-    pub fn set_caldata_xtalk(&mut self, xtalk_data: &[u8]) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        if xtalk_data.len() != VL53L5CX_XTALK_BUFFER_SIZE { return Err(DriverError::Sensor(SensorStatus::InvalidParam)); }
-        let status = wrappers::set_caldata_xtalk(&mut self.config, xtalk_data.as_ptr() as *mut u8);
-        Self::check_ok(status)
-    }
-
-    #[cfg(feature = "thresholds")]
-    /// Programs the detection thresholds.
-    ///
-    /// This function takes an array of up to 64 `VL53L5CX_DetectionThresholds` checkers.
-    /// Each checker defines a condition (e.g., distance < 500mm in zone 5) that can be used
-    /// to trigger an interrupt.
-    pub fn set_detection_thresholds(&mut self, thresholds: &mut bindings::VL53L5CX_DetectionThresholds) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::set_detection_thresholds(&mut self.config, thresholds);
-        Self::check_ok(status)
-    }
-
-    #[cfg(any(feature = "motion", feature = "thresholds"))]
-    /// Initializes the motion indicator functionality.
-    /// By default, the indicator is programmed to monitor movements between 400mm and 1500mm.
-    /// This function must be called before using other motion indicator methods.
-    pub fn motion_indicator_init(&mut self, motion_config: &mut bindings::VL53L5CX_Motion_Configuration, resolution: Resolution) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::motion_indicator_init(&mut self.config, motion_config, resolution as u8);
-        Self::check_ok(status)
-    }
-
-    #[cfg(any(feature = "motion", feature = "thresholds"))]
-    /// Sets the minimum and maximum distance for motion detection.
-    ///
-    /// This function changes the working distance of the motion indicator.
-    /// - `distance_min_mm`: Minimum distance for indicator (min 400mm, max 4000mm).
-    /// - `distance_max_mm`: Maximum distance for indicator (min 400mm, max 4000mm).
-    pub fn motion_indicator_set_distance_motion(&mut self, motion_config: &mut bindings::VL53L5CX_Motion_Configuration, distance_min_mm: u16, distance_max_mm: u16) -> Result<(), DriverError> {
-        self.refresh_pointers();
-        let status = wrappers::motion_indicator_set_distance_motion(&mut self.config, motion_config, distance_min_mm, distance_max_mm);
-        Self::check_ok(status)
-    }
-
-    fn check_ok(status: u8) -> Result<(), DriverError> {
-        if status == 255 { Err(DriverError::I2c) }
-        else if status == 0 { Ok(()) }
-        else { Err(DriverError::Sensor(status.into())) }
     }
 }
 
-impl<'a, I: I2c<SevenBitAddress>, D: DelayNs> Drop for Vl53l5cx<'a, I, D> {
-    fn drop(&mut self) {
-        let _ = self.stop_ranging();
+/// Builder methods for optional pins.
+impl<I2C, D, RST, INT> Vl53l5cx<I2C, D, RST, INT> {
+    /// Attaches a reset pin (LPn) to the driver.
+    ///
+    /// The reset pin is required for changing the sensor's I2C address and is
+    /// crucial for managing multi-sensor setups.
+    pub fn with_reset<RstNew>(self, reset_pin: RstNew) -> Vl53l5cx<I2C, D, RstNew, INT> {
+        Vl53l5cx {
+            i2c: self.i2c,
+            delay: self.delay,
+            address: self.address,
+            reset_pin,
+            int_pin: self.int_pin,
+            has_reset: true,
+            stdev: self.stdev,
+        }
     }
+
+    /// Attaches an interrupt pin (INT) to the driver.
+    ///
+    /// The interrupt pin is used by the sensor to signal that new ranging
+    /// data is ready.
+    pub fn with_interrupt<IntNew>(self, int_pin: IntNew) -> Vl53l5cx<I2C, D, RST, IntNew> {
+        Vl53l5cx {
+            i2c: self.i2c,
+            delay: self.delay,
+            address: self.address,
+            reset_pin: self.reset_pin,
+            int_pin,
+            has_reset: self.has_reset,
+            stdev: self.stdev,
+        }
+    }
+}
+
+/// Core driver functionality.
+impl<I2C, D, RST, INT, E> Vl53l5cx<I2C, D, RST, INT>
+where
+    I2C: I2c<Error = E>,
+    D: DelayNs,
+    // The `OutputPin` trait bound is now satisfied by `NoPin` as well.
+    // The error type of the pin must be mappable to our driver's PinMissing error.
+    RST: OutputPin,
+    <RST as embedded_hal::digital::ErrorType>::Error: core::fmt::Debug,
+{
+    /// Changes the I2C address of the sensor.
+    ///
+    /// This method requires the reset pin (LPn) to be configured via `with_reset()`.
+    /// It ensures the sensor is enabled, sends the I2C command to change the address,
+    /// and updates the driver's internal state.
+    ///
+    /// In a multi-sensor setup, you should keep all other sensors in reset (LPn low)
+    /// while changing the address of one.
+    ///
+    /// # Arguments
+    /// * `new_address` - The new 7-bit I2C address for the sensor.
+    ///
+    /// # Errors
+    /// Returns `Error::PinMissing` if the reset pin has not been configured.
+    pub fn set_address(&mut self, new_address: u8) -> Result<(), Error<E>> {
+        // Explicitly check if a reset pin was configured. The `OutputPin` trait
+        // on `NoPin` is for `init()`, but `set_address` must have a real pin.
+        if !self.has_reset {
+            return Err(Error::PinMissing);
+        }
+        // To ensure a clean state, especially in multi-sensor setups, we cycle the reset pin.
+        // 1. Disable (Reset)
+        self.reset_pin.set_low().map_err(|_| Error::PinMissing)?;
+        self.delay.delay_ms(2);
+
+        // 2. Enable (Wake up)
+        self.reset_pin.set_high().map_err(|_| Error::PinMissing)?;
+        self.delay.delay_ms(2);
+
+
+        // Use the official ULD function to change the address. This ensures the
+        // driver's internal state remains synchronized with the hardware.
+        let status = unsafe {
+            sys::vl53l5cx_set_i2c_address(&mut self.stdev, new_address as u16)
+        };
+
+        if status != 0 {
+            return Err(Error::Firmware(status));
+        }
+
+        // Update the address in our driver struct to match.
+        self.address = new_address;
+
+        Ok(())
+    }
+
+    /// Initializes the sensor.
+    ///
+    /// This function performs the full boot sequence for the sensor, which includes:
+    /// 1. Verifying that the sensor is alive on the I2C bus.
+    /// 2. Transferring the large (~120KB) firmware image to the sensor's RAM.
+    /// 3. Booting the firmware and verifying the device ID.
+    ///
+    /// This is a blocking operation that can take a significant amount of time
+    /// due to the large firmware transfer over I2C.
+    ///
+    /// It must be called after creating the driver (`new()`) and after any
+    /// address changes (`set_address()`).
+    /// # Errors
+    /// - `Error::PinMissing` if the reset pin is not configured.
+    /// - `Error::NotAlive` if the sensor does not respond on the I2C bus.
+    /// - `Error::Firmware` if the firmware fails to load and initialize.
+    pub fn init(&mut self) -> Result<(), Error<E>> {
+        // Ensure the sensor is powered on and not in reset.
+        self.reset_pin.set_high().map_err(|_| Error::PinMissing)?; // This now works with NoPin
+        self.delay.delay_ms(2);
+
+        // Fill platform-specific fields in the ST driver state.
+        self.stdev.platform.address = self.address as u16;
+        // NOTE: The `platform.i2c` field is a placeholder. All I2C operations
+        // will be handled by the `embedded-hal` trait implementations.
+
+        // Check if the sensor is alive.
+        let mut is_alive: u8 = 0;
+        let status = unsafe {
+            sys::vl53l5cx_is_alive(&mut self.stdev, &mut is_alive)
+        };
+        if status != 0 || is_alive == 0 {
+            return Err(Error::NotAlive);
+        }
+
+        // Initialize the sensor. This loads the firmware.
+        let status = unsafe { sys::vl53l5cx_init(&mut self.stdev) };
+        if status != 0 {
+            return Err(Error::Firmware(status));
+        }
+
+        Ok(())
+    }
+
+    // --- FFI Helper Methods ---
+    // These methods are called by the `impl_vl53l5cx_comms!` macro.
+
+    /// Platform-specific I2C read.
+    pub fn comms_read(&mut self, index: u16, data: &mut [u8]) -> Result<(), Error<E>> {
+        let index_bytes = index.to_be_bytes();
+        self.i2c.write_read(self.address, &index_bytes, data).map_err(Error::I2c)
+    }
+
+    /// Platform-specific I2C write.
+    pub fn comms_write(&mut self, index: u16, data: &[u8]) -> Result<(), Error<E>> {
+        let index_bytes = index.to_be_bytes();
+
+        // The ULD requires the 16-bit index and data to be sent in a single I2C transaction.
+        // We must concatenate them. To avoid heap allocation, we use a stack buffer.
+        // The largest single transaction is the firmware download, but that is handled
+        // by the ULD in chunks. A 260-byte buffer is safe for other commands.
+        const MAX_WRITE_BUFFER: usize = 260;
+        let write_len = 2 + data.len();
+
+        if write_len > MAX_WRITE_BUFFER {
+            // This case should ideally not be hit with the current ULD.
+            // If it is, it indicates a very large write that isn't firmware.
+            return Err(Error::Firmware(255)); // Indicate a platform error.
+        }
+
+        let mut buffer = [0u8; MAX_WRITE_BUFFER];
+        buffer[0..2].copy_from_slice(&index_bytes);
+        buffer[2..write_len].copy_from_slice(data);
+
+        self.i2c.write(self.address, &buffer[..write_len]).map_err(Error::I2c)
+    }
+
+    /// Platform-specific delay.
+    pub fn comms_wait_ms(&mut self, ms: u32) {
+        self.delay.delay_ms(ms);
+    }
+}
+
+/// Generates the `extern "C"` functions required by the `vl53l5cx-sys` crate.
+///
+/// The ST ULD (Ultra Lite Driver) is written in C and expects to be able to call
+/// global functions for platform-specific operations like I2C communication and delays.
+/// This macro creates those required functions and routes the calls to a specific,
+/// statically-defined driver instance.
+///
+/// # Usage
+///
+/// In your application's binary crate, define a static `Mutex` to hold your
+/// `Vl53l5cx` driver instance. Then, invoke this macro with the path to that static variable.
+///
+/// ```ignore
+/// // In your main.rs or equivalent
+/// use std::sync::Mutex;
+/// use once_cell::sync::Lazy;
+/// use vl53l5cx_driver::{Vl53l5cx, impl_vl53l5cx_comms};
+///
+/// // Define a static, mutex-protected driver instance.
+/// // The types must be fully specified.
+/// static VL53L5CX_DRIVER: Lazy<Mutex<Vl53l5cx</* I2C */, /* Delay */>>> = Lazy::new(|| {
+///     // Create your I2C and Delay implementations
+///     let i2c = ...;
+///     let delay = ...;
+///     Mutex::new(Vl53l5cx::new(i2c, delay))
+/// });
+///
+/// // Generate the FFI functions, pointing them to your static driver.
+/// impl_vl53l5cx_comms!(VL53L5CX_DRIVER);
+/// ```
+///
+/// For `no_std` environments, you would typically use a `Mutex` from a crate like `critical-section`.
+#[macro_export]
+macro_rules! impl_vl53l5cx_comms {
+    ($driver_static:path) => {
+        use $crate::sys::VL53L5CX_Platform;
+
+        #[no_mangle]
+        pub extern "C" fn VL53L5CX_RdMulti(
+            p_platform: *mut VL53L5CX_Platform,
+            index: u16,
+            p_values: *mut u8,
+            size: u32,
+        ) -> u8 {
+            if p_platform.is_null() { return 255; }
+            let mut driver = $driver_static.lock().unwrap();
+            let data_slice = unsafe { core::slice::from_raw_parts_mut(p_values, size as usize) };
+
+            // The address in p_platform is updated by the driver's init() method.
+            // We can optionally verify it matches our driver's state.
+            if unsafe{ (*p_platform).address as u8 != driver.address } {
+                return 255; // Address mismatch error
+            }
+
+            match driver.comms_read(index, data_slice) {
+                Ok(_) => 0,
+                Err(_) => 1, // ULD expects 1 for I2C errors
+            }
+        }
+
+        #[no_mangle]
+        pub extern "C" fn VL53L5CX_WrMulti(
+            p_platform: *mut VL53L5CX_Platform,
+            index: u16,
+            p_values: *mut u8,
+            size: u32,
+        ) -> u8 {
+            if p_platform.is_null() { return 255; }
+            let mut driver = $driver_static.lock().unwrap();
+            let data_slice = unsafe { core::slice::from_raw_parts(p_values, size as usize) };
+
+            match driver.comms_write(index, data_slice) {
+                Ok(_) => 0,
+                Err(_) => 1,
+            }
+        }
+
+        #[no_mangle]
+        pub extern "C" fn VL53L5CX_WaitMs(_p_platform: *mut VL53L5CX_Platform, milliseconds: u32) -> u8 {
+            let mut driver = $driver_static.lock().unwrap();
+            driver.comms_wait_ms(milliseconds);
+            0 // Success
+        }
+    };
 }
