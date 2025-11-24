@@ -4,33 +4,6 @@ A platform-agnostic driver for the VL53L5CX Time-of-Flight sensor.
 
 This driver is built on top of the `embedded-hal` traits and uses the official
 ST Microelectronics VL53L5CX ULD (Ultra Lite Driver) via the `vl53l5cx-sys` crate.
-
-## Features
-- `std`: Enables `std::error::Error` implementation for the `Error` type.
-- `xtalk`: Enables cross-talk calibration functions.
-- `motion`: Enables motion indicator functions.
-- `thresholds`: Enables detection thresholds functions.
-
-## Usage for Multiple Sensors
-
-To support multiple sensors on different buses (or the same bus), use the `bind_platform_driver!` macro 
-in your application. This generates the required C callbacks that route calls to the correct 
-sensor instance via a context pointer.
-
-```rust,ignore
-// In main.rs
-use vl53l5cx_driver::bind_platform_driver;
-// ... imports for your I2C and Delay types ...
-
-// Generate the callbacks for your specific I2C and Delay types.
-// This must be done ONCE in your binary.
-bind_platform_driver!(MyI2cType, MyDelayType);
-
-fn main() {
-   // You can now instantiate multiple Vl53l5cx drivers using MyI2cType and MyDelayType.
-}
-```
-
 */
 
 use embedded_hal::delay::DelayNs;
@@ -42,12 +15,9 @@ use embedded_hal::i2c::{I2c, SevenBitAddress};
 use embedded_hal::digital::OutputPin;
 
 // We import the sys crate internally but do NOT make it public.
-// This hides the low-level DCI functions from the end user.
 use vl53l5cx_sys as sys;
 
 // --- Public Type Re-exports ---
-// These structs are required for the user to interpret results, 
-// but we hide the rest of the C API.
 pub use sys::VL53L5CX_Platform; 
 pub use sys::VL53L5CX_ResultsData as ResultsData;
 
@@ -56,6 +26,9 @@ pub use sys::VL53L5CX_Motion_Configuration as MotionConfiguration;
 
 /// The default I2C address of the VL53L5CX sensor.
 pub const DEFAULT_ADDRESS: u8 = 0x29;
+
+/// The required buffer size for crosstalk calibration data (776 bytes).
+pub const XTALK_BUFFER_SIZE: usize = 776;
 
 #[cfg(feature = "thresholds")]
 use sys::VL53L5CX_NB_THRESHOLDS;
@@ -91,7 +64,6 @@ pub enum PowerMode {
 }
 
 #[cfg(feature = "thresholds")]
-/// The measurement parameter to be checked by a detection threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ThresholdMeasurement {
@@ -106,7 +78,6 @@ pub enum ThresholdMeasurement {
 }
 
 #[cfg(feature = "thresholds")]
-/// The comparison window type for a detection threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ThresholdType {
@@ -119,18 +90,15 @@ pub enum ThresholdType {
 }
 
 #[cfg(feature = "thresholds")]
-/// The logical operator used to combine multiple thresholds in the same zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ThresholdOperation {
-    /// Note: The first threshold in a zone MUST be an OR operation (`VL53L5CX_OPERATION_OR`).
     Or = sys::VL53L5CX_OPERATION_OR,
     And = sys::VL53L5CX_OPERATION_AND,
     None = sys::VL53L5CX_OPERATION_NONE,
 }
 
 #[cfg(feature = "thresholds")]
-/// A single detection threshold configuration.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)] 
 pub struct DetectionThreshold {
@@ -212,18 +180,13 @@ impl<E: std::fmt::Debug> std::fmt::Display for Error<E> {
     }
 }
 
-/// A separate struct to hold the I2C and Delay instances.
-/// This is pointed to by `p_com` in the C platform struct, allowing the 
-/// callbacks to retrieve the specific peripherals for this sensor instance.
 #[repr(C)]
 pub struct Vl53l5cxComms<I2C, D> {
     pub i2c: I2C,
     pub delay: D,
 }
 
-/// The main driver struct for the VL53L5CX sensor.
 pub struct Vl53l5cx<I2C, D, RST = NoPin, INT = NoPin> {
-    /// Communication peripherals wrapped for FFI access.
     pub comms: Vl53l5cxComms<I2C, D>,
     address: SevenBitAddress,
     reset_pin: RST,
@@ -231,7 +194,6 @@ pub struct Vl53l5cx<I2C, D, RST = NoPin, INT = NoPin> {
     has_reset: bool,
     lp_is_reset_high: bool, 
     int_is_data_ready_high: bool,   
-    /// Internal driver state (C struct).
     stdev: sys::VL53L5CX_Configuration,
 }
 
@@ -358,7 +320,6 @@ where
     RST: OutputPin,
     <RST as embedded_hal::digital::ErrorType>::Error: Into<E> + core::fmt::Debug, 
 {
-    /// Helper: Updates the internal C struct's `p_com` pointer to point to `self.comms`.
     #[inline]
     fn bind_platform(&mut self) {
         self.stdev.platform.p_com = &mut self.comms as *mut _ as *mut core::ffi::c_void;
@@ -389,7 +350,6 @@ where
         if !self.has_reset {
             return Err(Error::PinMissing);
         }
-
         self.set_reset_state(true)?; 
         self.comms.delay.delay_ms(2);
         self.set_reset_state(false)?; 
@@ -403,10 +363,8 @@ where
         if status != 0 {
             return Err(Error::Firmware(status.into()));
         }
-
         self.address = new_address;
         self.stdev.platform.address = new_address as u16;
-
         Ok(())
     }
 
@@ -630,43 +588,26 @@ where
         self.comms.delay.delay_ms(2);
 
         self.stdev.platform.address = self.address as u16;
-        self.bind_platform(); // Set p_com before checking alive
+        self.bind_platform(); 
 
         if !self.is_alive()? {
             return Err(Error::NotAlive);
         }
 
-        self.bind_platform(); // Set p_com before init
+        self.bind_platform(); 
         let status = unsafe { sys::vl53l5cx_init(&mut self.stdev) };
         if status != 0 {
             return Err(Error::Firmware(status.into()));
         }
-
         Ok(())
     }
-}
 
-impl<I2C, D, RST, INT, E> Vl53l5cx<I2C, D, RST, INT>
-where
-    I2C: I2c<Error = E>,
-    D: DelayNs,
-    RST: OutputPin,
-    <RST as embedded_hal::digital::ErrorType>::Error: Into<E> + core::fmt::Debug,
-{
     pub fn is_alive(&mut self) -> Result<bool, Error<E>> {
         self.bind_platform();
         let (status, is_alive) = sys::wrappers::is_alive(&mut self.stdev);
         match status { sys::VL53L5CX_STATUS_OK => Ok(is_alive != 0), s => Err(Error::Firmware(s.into())), }
     }
-}
 
-impl<I2C, D, RST, INT, E> Vl53l5cx<I2C, D, RST, INT>
-where
-    I2C: I2c<Error = E>,
-    D: DelayNs,
-    RST: OutputPin,
-    <RST as embedded_hal::digital::ErrorType>::Error: Into<E> + core::fmt::Debug,
-{
     pub fn get_ranging_data(&mut self) -> Result<sys::VL53L5CX_ResultsData, Error<E>> {
         self.bind_platform();
         let (status, value) = sys::wrappers::get_ranging_data(&mut self.stdev);
@@ -674,7 +615,7 @@ where
     }
 }
 
-// --- New Macro for Dynamic Platform Context ---
+// --- Macro for Dynamic Platform Context ---
 #[macro_export]
 macro_rules! bind_platform_driver {
     ($i2c_type:ty, $delay_type:ty) => {
@@ -692,9 +633,7 @@ macro_rules! bind_platform_driver {
             size: u32,
         ) -> u8 {
             if p_platform.is_null() { return 255; }
-            
             let platform = unsafe { &*p_platform };
-            // Cast p_com back to the generic comms struct
             let comms = unsafe { &mut *(platform.p_com as *mut Vl53l5cxComms<$i2c_type, $delay_type>) };
             
             let data_slice = unsafe { core::slice::from_raw_parts_mut(p_values, size as usize) };
@@ -715,7 +654,6 @@ macro_rules! bind_platform_driver {
             size: u32,
         ) -> u8 {
             if p_platform.is_null() { return 255; }
-            
             let platform = unsafe { &*p_platform };
             let comms = unsafe { &mut *(platform.p_com as *mut Vl53l5cxComms<$i2c_type, $delay_type>) };
             
@@ -848,7 +786,8 @@ where
     }
     
     pub fn get_caldata_xtalk(&mut self, buffer: &mut [u8]) -> Result<(), Error<E>> {
-        if buffer.len() < sys::VL53L5CX_XTALK_BUFFER_SIZE as usize {
+        // Use local constant for buffer size
+        if buffer.len() < XTALK_BUFFER_SIZE {
              return Err(Error::Firmware(sys::VL53L5CX_STATUS_INVALID_PARAM.into()));
         }
         self.bind_platform();
@@ -860,7 +799,8 @@ where
     }
 
     pub fn set_caldata_xtalk(&mut self, buffer: &mut [u8]) -> Result<(), Error<E>> {
-         if buffer.len() < sys::VL53L5CX_XTALK_BUFFER_SIZE as usize {
+         // Use local constant for buffer size
+         if buffer.len() < XTALK_BUFFER_SIZE {
              return Err(Error::Firmware(sys::VL53L5CX_STATUS_INVALID_PARAM.into()));
         }
         self.bind_platform();
