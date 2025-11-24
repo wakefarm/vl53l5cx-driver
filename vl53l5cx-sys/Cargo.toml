@@ -16,6 +16,21 @@ bindgen = "0.69"
 cc = "1.2"
 
 [features]
+# Standard Plugin Features (Opt-in to include)
 xtalk = []
 motion = []
 thresholds = []
+
+# --- New Feature: Raw Firmware Format ---
+raw-format = []
+
+# --- Output Disablement Features for Size Optimization (Opt-in to DISABLE/remove) ---
+disable-ambient = []
+disable-spads = []
+disable-nb-targets = []
+disable-signal = []
+disable-range-sigma = []
+disable-distance = []
+disable-target-status = []
+disable-reflectance = []
+disable-motion-indicator-output = []

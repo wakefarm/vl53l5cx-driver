@@ -50,6 +50,50 @@ fn main() {
         bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_MOTION_INDICATOR");
     }
 
+// --- Feature: Raw Firmware Format ---
+if env::var("CARGO_FEATURE_RAW_FORMAT").is_ok() {
+    cc_build.define("VL53L5CX_USE_RAW_FORMAT", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_USE_RAW_FORMAT=1");
+}
+
+// --- Output Disablement Features for Size Optimization (maps to VL53L5CX_DISABLE_... macros) ---
+if env::var("CARGO_FEATURE_DISABLE_AMBIENT").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_AMBIENT_PER_SPAD", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_AMBIENT_PER_SPAD");
+}
+if env::var("CARGO_FEATURE_DISABLE_SPADS").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_NB_SPADS_ENABLED", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_NB_SPADS_ENABLED");
+}
+if env::var("CARGO_FEATURE_DISABLE_NB_TARGETS").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_NB_TARGET_DETECTED", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_NB_TARGET_DETECTED");
+}
+if env::var("CARGO_FEATURE_DISABLE_SIGNAL").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_SIGNAL_PER_SPAD", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_SIGNAL_PER_SPAD");
+}
+if env::var("CARGO_FEATURE_DISABLE_RANGE_SIGMA").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_RANGE_SIGMA_MM", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_RANGE_SIGMA_MM");
+}
+if env::var("CARGO_FEATURE_DISABLE_DISTANCE").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_DISTANCE_MM", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_DISTANCE_MM");
+}
+if env::var("CARGO_FEATURE_DISABLE_TARGET_STATUS").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_TARGET_STATUS", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_TARGET_STATUS");
+}
+if env::var("CARGO_FEATURE_DISABLE_REFLECTANCE").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_REFLECTANCE_PERCENT", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_REFLECTANCE_PERCENT");
+}
+if env::var("CARGO_FEATURE_DISABLE_MOTION_INDICATOR_OUTPUT").is_ok() {
+    cc_build.define("VL53L5CX_DISABLE_MOTION_INDICATOR", "1");
+    bindgen_builder = bindgen_builder.clang_arg("-DVL53L5CX_DISABLE_MOTION_INDICATOR");
+}
+
     // --- Configuration for Cross-Compilation ---
     let target = env::var("TARGET").unwrap();
     if target.starts_with("armv7-unknown-linux-") {

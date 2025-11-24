@@ -136,7 +136,36 @@ pub fn set_caldata_xtalk(config: &mut Cfg, xtalk_data: *mut u8) -> u8 {
 }
 
 #[cfg(feature = "thresholds")]
-pub fn set_detection_thresholds(config: &mut Cfg, thresholds: &mut VL53L5CX_DetectionThresholds) -> u8 {
+pub fn get_detection_thresholds_enable(config: &mut Cfg) -> (u8, u8) {
+    let mut enabled: u8 = 0;
+    let status = unsafe { crate::vl53l5cx_get_detection_thresholds_enable(config, &mut enabled) };
+    (status, enabled)
+}
+
+#[cfg(feature = "thresholds")]
+pub fn set_detection_thresholds_enable(config: &mut Cfg, enabled: u8) -> u8 {
+    unsafe { crate::vl53l5cx_set_detection_thresholds_enable(config, enabled) }
+}
+
+#[cfg(feature = "xtalk")]
+pub fn get_xtalk_margin(config: &mut Cfg) -> (u8, u32) {
+    let mut xtalk_margin: u32 = 0;
+    let status = unsafe { crate::vl53l5cx_get_xtalk_margin(config, &mut xtalk_margin) };
+    (status, xtalk_margin)
+}
+
+#[cfg(feature = "xtalk")]
+pub fn set_xtalk_margin(config: &mut Cfg, margin: u32) -> u8 {
+    unsafe { crate::vl53l5cx_set_xtalk_margin(config, margin) }
+}
+
+#[cfg(feature = "thresholds")]
+pub fn get_detection_thresholds(config: &mut Cfg, thresholds: *mut crate::VL53L5CX_DetectionThresholds) -> u8 {
+    unsafe { crate::vl53l5cx_get_detection_thresholds(config, thresholds) }
+}
+
+#[cfg(feature = "thresholds")]
+pub fn set_detection_thresholds(config: &mut Cfg, thresholds: *mut crate::VL53L5CX_DetectionThresholds) -> u8 {
     unsafe { crate::vl53l5cx_set_detection_thresholds(config, thresholds) }
 }
 
@@ -148,4 +177,9 @@ pub fn motion_indicator_init(config: &mut Cfg, motion_config: &mut VL53L5CX_Moti
 #[cfg(any(feature = "motion", feature = "thresholds"))]
 pub fn motion_indicator_set_distance_motion(config: &mut Cfg, motion_config: &mut VL53L5CX_Motion_Configuration, distance_min_mm: u16, distance_max_mm: u16) -> u8 {
     unsafe { crate::vl53l5cx_motion_indicator_set_distance_motion(config, motion_config, distance_min_mm, distance_max_mm) }
+}
+
+#[cfg(any(feature = "motion", feature = "thresholds"))]
+pub fn motion_indicator_set_resolution(config: &mut Cfg, motion_config: &mut VL53L5CX_Motion_Configuration, resolution: u8) -> u8 {
+    unsafe { crate::vl53l5cx_motion_indicator_set_resolution(config, motion_config, resolution) }
 }

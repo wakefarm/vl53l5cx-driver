@@ -4,4 +4,3 @@ members = [
     "vl53l5cx-driver",
 ]
 resolver = "2"
-default-members = ["vl53l5cx-sys", "vl53l5cx-driver"]
